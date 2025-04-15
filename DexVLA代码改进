@@ -1,0 +1,69 @@
+# 初始化Qwen2-VL视觉语言模型
+self.model = Qwen2VLModel(config)  # 使用预训练配置初始化VL基础模型
+
+# 定义ScaleDP策略网络（扩散策略变体）
+class ScaleDP(PreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+        # 构建多层Transformer块（32个block）
+        self.blocks = nn.ModuleList([
+            # 每个block包含注意力机制（16头）和MLP（扩展比由mlp_ratio控制）
+            ScaleDPBlock(
+                embed_dim=config.n_emb,  # 1280维嵌入空间
+                num_heads=config.num_heads,  # 16个注意力头
+                mlp_ratio=config.mlp_ratio  # MLP扩展比例（通常为4）
+            ) for _ in range(config.depth)  # 32层深度
+        ])
+        # 添加特征线性调制网络
+        self.film = FilmNetwork(config.n_emb)  # 独立定义的特征调制网络
+        # 输出投影层
+        self.proj_out = nn.Linear(config.n_emb, config.action_dim)
+
+# 特征线性调制网络定义
+class FilmNetwork(nn.Module):
+    def __init__(self, embed_dim):
+        super().__init__()
+        # 使用全连接层生成特征调制参数
+        self.gamma = nn.Linear(embed_dim, embed_dim)
+        self.beta = nn.Linear(embed_dim, embed_dim)
+
+    def forward(self, x):
+        # 应用特征仿射变换：γ * x + β
+        return self.gamma(x) * x + self.beta(x)
+
+# 策略头使用ScaleDP实例（原错误：使用AutoModel）
+self.policy_head = ScaleDP(config=config.scaledp_config)
+
+def forward(self, input_ids, ...):
+    # 嵌入共享空间：将输入token映射到嵌入空间
+    inputs_embeds = self.model.embed_tokens(input_ids)  # (batch, seq_len, 1280)
+    
+    # VLM前向传播：获取多模态理解结果
+    outputs = self.model(
+        inputs_embeds=inputs_embeds,
+        ...  # 其他输入参数（如attention_mask等）
+    )
+    hidden_states = outputs.last_hidden_state  # (batch, seq_len, 1280)
+    
+    # 特征线性调制：融合VLM状态和机器人动作特征
+    # 修改点：调用film模块而非未定义的方法
+    action_hidden = self.film(hidden_states)  # 通过Film网络
+    
+    # ScaleDP前向传播：生成动作预测
+    # 修改点：通过ScaleDP模块处理
+    action_logits = self.policy_head(
+        hidden_states=action_hidden,
+        ...  # 其他策略输入
+    )
+    
+    return action_logits
+# 原代码中存在以下问题：
+# policy_head错误地使用了AutoModel
+# 缺少Film网络模块的定义
+# film_forward方法未实现
+# 主要改进点说明：
+# 将policy_head从AutoModel改为ScaleDP实例，确保使用正确的策略网络结构
+# 新增FilmNetwork模块实现特征线性调制，代替原未定义的film_forward方法
+# 明确定义了ScaleDP各组件参数维度，确保1280维嵌入空间的维度一致性
+# 添加输出投影层将高维特征映射到动作空间
+# 修正hidden_states的获取方式（使用last_hidden_state属性）
